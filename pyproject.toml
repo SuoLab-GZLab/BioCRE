@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61", "setuptools-scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "biocre"
+version = "1.17"
+authors = [{name = "Bingbing Xie", email = "xie_bingbing@gzlab.ac.cn"}]
+readme = "README.md"
+license = {file = "LICENSE"}
+classifiers = ["License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)"]
+dependencies = [
+    "diopy",
+    "scipy",
+    "scanpy",
+    "pandas",
+    "numpy==1.23.4",
+    "natsort",
+    "matplotlib",
+    "pyranges",
+    "joblib",
+    "statsmodels",
+    "torch",
+    "tqdm",
+    "packaging"
+]
+
+[project.urls]
+Home = "https://github.com/xiebb7/biocre"

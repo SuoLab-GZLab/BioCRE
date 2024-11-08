@@ -1,0 +1,13 @@
+diopy
+scipy
+scanpy
+pandas
+numpy==1.23.4
+natsort
+matplotlib
+pyranges
+joblib
+statsmodels
+torch
+tqdm
+packaging
