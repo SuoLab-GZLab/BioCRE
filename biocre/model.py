@@ -9,13 +9,18 @@ from tqdm import tqdm
 import torch.nn as nn
 from scipy.stats import norm
 from statsmodels.stats.multitest import multipletests
-from joblib import Parallel, delayed
 import pyranges as pr
 from scipy.stats import combine_pvalues
 
 def initialize_weights(L,
                        initialize_method='He'):
-
+    """
+    Initialize weights for the linkage matrix using different methods.
+    
+    Args:
+        L (torch.Tensor): The linkage matrix to initialize
+        initialize_method (str, optional): Method to initialize weights. Options: 'He', 'Xavier', or None. Defaults to 'He'.
+    """
     if initialize_method=='He':
         nn.init.kaiming_normal_(L, nonlinearity='linear')
 
@@ -25,29 +30,40 @@ def initialize_weights(L,
     if initialize_method is None:
         return(L)
 
-def combine_pvalues_row(row,
-                        method):
-    p_values = [row['P.adj_Gene'], row['P.adj_Peak']]
-    result = combine_pvalues(p_values, method).pvalue
-    return result
-
 def closure(G,
             P,
             L,
             optimizer,
             lambda_l2,
             losses):
-
+    """
+    Create a closure function for LBFGS optimizer to compute loss and gradients.
+    
+    Args:
+        G (torch.Tensor): Gene expression matrix
+        P (torch.Tensor): Peak accessibility matrix
+        L (torch.Tensor): Linkage matrix
+        optimizer (torch.optim): Optimizer instance
+        lambda_l2 (float): L2 regularization parameter
+        losses (list): List to store loss values
+    
+    Returns:
+        function: Closure function for optimizer
+    """
     def closure_fn():
         optimizer.zero_grad()
+
         predictions1 = torch.matmul(L, P)
         predictions2 = torch.matmul(L.T, G)
+
         criterion = torch.nn.MSELoss()
         loss = criterion(predictions1, G) + \
                criterion(predictions2, P) + \
                lambda_l2 * torch.norm(L, 2)
+        
         losses.append(loss.item())
         loss.backward()
+
         torch.cuda.empty_cache()
         gc.collect()
         return loss
@@ -57,6 +73,13 @@ def closure(G,
 
 def plot_losses(losses,
                 chrs):
+    """
+    Plot training losses for each chromosome.
+    
+    Args:
+        losses (list): List of loss values for each chromosome
+        chrs (list): List of chromosome names
+    """
     num_plots = len(losses)
     ncols = 5
     nrows = num_plots // ncols + (num_plots % ncols > 0)
@@ -81,24 +104,58 @@ def plot_losses(losses,
 
 
 def linkage(rna_adata,
-            atac_adata,
-            meta,
-            min_cell=5,
-            lr=0.1,
-            max_iter=100,
-            lambda_l2=0.1,
-            plot=True,
-            initialize_method='He',
-            normalize='col',
-            downsample=None):
+             atac_adata,
+             meta,
+             min_cell=5,
+             lr=0.1,
+             max_iter=100,
+             lambda_l2=0.1,
+             plot=True,
+             initialize_method='He',
+             normalize='col',
+             exclude_chr='chrM',
+             exclude_gene=None,
+             exclude_peak=None,
+             downsample=None,
+             tolerance_grad=1e-7,
+             tolerance_change=1e-9,
+             history_size=100,
+             verbose=False):
+    """
+    Calculate linkage between RNA and ATAC data.
+    
+    Args:
+        rna_adata (AnnData): RNA expression data
+        atac_adata (AnnData): ATAC accessibility data
+        meta (pd.DataFrame): Metadata containing gene and peak information
+        min_cell (int, optional): Minimum number of cells expressing a feature. Defaults to 5.
+        lr (float, optional): Learning rate for optimization. Defaults to 0.1.
+        max_iter (int, optional): Maximum number of iterations. Defaults to 100.
+        lambda_l2 (float, optional): L2 regularization parameter. Defaults to 0.1.
+        plot (bool, optional): Whether to plot losses. Defaults to True.
+        initialize_method (str, optional): Weight initialization method. Defaults to 'He'.
+        normalize (str, optional): Normalization method ('row' or 'col'). Defaults to 'col'.
+        exclude_chr (str, optional): Chromosome to exclude. Defaults to 'chrM'.
+        exclude_gene (list, optional): Genes to exclude. Defaults to None.
+        exclude_peak (list, optional): Peaks to exclude. Defaults to None.
+        downsample (int, optional): Number of cells to downsample. Defaults to None.
+    
+    Returns:
+        list: List of linkage matrices for each chromosome
+    """
+    rna_cells = rna_adata.obs.index.tolist()
+    atac_cells = atac_adata.obs.index.tolist()
+
+    if sorted(rna_cells) != sorted(atac_cells):
+        raise ValueError('The RNA and ATAC data is not paired!')
+
+    if rna_cells != atac_cells:
+        rna_cells_sorted = sorted(rna_cells)
+        atac_cells_sorted = sorted(atac_cells)
+        rna_adata = rna_adata[rna_cells_sorted, :]
+        atac_adata = atac_adata[atac_cells_sorted, :]
 
     if downsample is not None:
-
-        try:
-            num = float(downsample)
-        except ValueError:
-            print("Pleses input the number of downsampling cells!")
-            return
 
         if downsample > rna_adata.n_obs:
             downsample = rna_adata.n_obs
@@ -109,29 +166,42 @@ def linkage(rna_adata,
         atac_adata = atac_adata[random_indices].copy()
 
     atac_adata.var.index = atac_adata.var.index.str.replace(':', '-')
+
     chrs = natsorted([element for element in np.unique(meta[3].tolist()) if element.startswith('chr')])
+
+    if exclude_chr is not None:
+        chrs = [chr for chr in chrs if chr not in exclude_chr]
+
+    gene_to_index = {gene: idx for idx, gene in enumerate(rna_adata.var.index)}
+    peak_to_index = {peak: idx for idx, peak in enumerate(atac_adata.var.index)}
+
     linkage = []
     losses_list = []
 
     for chr in tqdm(chrs):
 
-        chr_p = chr + '-'
         chr_gene = np.unique(
             meta.iloc[np.where((meta[3].to_numpy() == chr) & (meta[2].to_numpy() == 'Gene Expression'))][1].to_numpy())
-        chr_peak = [item for item in atac_adata.var.index if chr_p in item]
+        #chr_peak = np.unique( meta.iloc[np.where((meta[3].to_numpy() == chr) & (meta[2].to_numpy() == 'Peaks'))][1].to_numpy())
+        #chr_peak = [element.replace(':', '-') for element in chr_peak]
+        chr_peak = np.array(natsorted([peak for peak in atac_adata.var.index if peak.startswith(str(chr + '-'))]))
         chr_gene = np.sort(np.array(list(set(chr_gene).intersection(set(rna_adata.var.index)))))
-        chr_peak = np.sort(np.array(list(set(chr_peak).intersection(set(atac_adata.var.index)))))
+        #chr_peak = np.sort(np.array(list(set(chr_peak).intersection(set(atac_adata.var.index)))))
 
-        gene_to_index = {gene: idx for idx, gene in enumerate(rna_adata.var.index)}
         gene_indices = [gene_to_index[gene] for gene in chr_gene if gene in gene_to_index]
         chr_gene_exp_data = rna_adata.X[:, gene_indices].T.toarray()
 
-        peak_to_index = {peak: idx for idx, peak in enumerate(atac_adata.var.index)}
         peak_indices = [peak_to_index[peak] for peak in chr_peak if peak in peak_to_index]
         chr_peak_exp_data = atac_adata.X[:, peak_indices].T.toarray()
 
         select_gene = chr_gene[np.where(np.sum(chr_gene_exp_data > 0, axis=1) > min_cell)[0]]
         select_peak = chr_peak[np.where(np.sum(chr_peak_exp_data > 0, axis=1) > min_cell)[0]]
+
+        if exclude_gene is not None:
+            select_gene = [gene for gene in select_gene if gene not in exclude_gene]
+
+        if exclude_peak is not None:
+            select_peak = [peak for peak in select_peak if peak not in exclude_peak]
 
         select_gene_to_index = {gene: idx for idx, gene in enumerate(chr_gene)}
         select_gene_indices = [select_gene_to_index[gene] for gene in select_gene if gene in gene_to_index]
@@ -148,14 +218,44 @@ def linkage(rna_adata,
             chr_gene_exp_data = np.delete(chr_gene_exp_data, filter_cell, axis=1)
             chr_peak_exp_data = np.delete(chr_peak_exp_data, filter_cell, axis=1)
 
+        # Check if we have valid genes and peaks after filtering
+        # This prevents the RuntimeError that occurs when the linkage matrix L becomes empty
+        if verbose:
+            print(f"Processing chromosome {chr}: {chr_gene_exp_data.shape[0]} genes, {chr_peak_exp_data.shape[0]} peaks, {chr_gene_exp_data.shape[1]} cells")
+        
+        if chr_gene_exp_data.shape[0] == 0:
+            print(f"Warning: No genes found for chromosome {chr} after filtering. Skipping.")
+            continue
+            
+        if chr_peak_exp_data.shape[0] == 0:
+            print(f"Warning: No peaks found for chromosome {chr} after filtering. Skipping.")
+            continue
+            
+        if chr_gene_exp_data.shape[1] == 0:
+            print(f"Warning: No cells found for chromosome {chr} after filtering. Skipping.")
+            continue
+
+        # Skip chromosomes with too few genes or peaks (may cause numerical instability)
+        if chr_gene_exp_data.shape[0] < 2:
+            print(f"Warning: Too few genes ({chr_gene_exp_data.shape[0]}) for chromosome {chr}. Skipping.")
+            continue
+            
+        if chr_peak_exp_data.shape[0] < 2:
+            print(f"Warning: Too few peaks ({chr_peak_exp_data.shape[0]}) for chromosome {chr}. Skipping.")
+            continue
+
+        # Clear GPU cache before processing each chromosome
+        torch.cuda.empty_cache()
+        gc.collect()
+        
         G = torch.from_numpy(chr_gene_exp_data).cuda(0)
         P = torch.from_numpy(chr_peak_exp_data).cuda(0)
-
-        if normalize=='row':
+        
+        if normalize == 'row':
             G = (G - torch.mean(G, dim=1, keepdim=True)) / torch.std(G, dim=1, keepdim=True)
             P = (P - torch.mean(P, dim=1, keepdim=True)) / torch.std(P, dim=1, keepdim=True)
 
-        if normalize=='col':
+        if normalize == 'col':
             G = (G - torch.mean(G, dim=0)) / torch.std(G, dim=0)
             P = (P - torch.mean(P, dim=0)) / torch.std(P, dim=0)
 
@@ -164,9 +264,14 @@ def linkage(rna_adata,
 
         losses = []
 
-        optimizer = LBFGS([L], lr=lr, max_iter=max_iter)
+        optimizer = LBFGS([L], lr=lr, max_iter=max_iter, tolerance_grad=tolerance_grad, tolerance_change=tolerance_change, history_size=history_size)
         closure_fn = closure(G, P, L, optimizer, lambda_l2, losses)
-        optimizer.step(closure_fn)
+        try:
+            optimizer.step(closure_fn)
+        except RuntimeError as e:
+            print(f"Warning: Optimization failed for chromosome {chr}: {str(e)}")
+            print(f"Chromosome {chr} dimensions - Genes: {G.shape[0]}, Peaks: {P.shape[0]}, Cells: {G.shape[1]}")
+            continue
         losses_list.append(losses)
         result = pd.DataFrame(L.cpu().detach().numpy(), index=select_gene, columns=select_peak)
         linkage.append(result)
@@ -178,94 +283,107 @@ def linkage(rna_adata,
 
     return linkage
 
+def calculate_median_mad(values):
+    """
+    Calculate median and MAD (Median Absolute Deviation) for each row.
+    
+    Args:
+        values (np.ndarray): Input matrix
+    
+    Returns:
+        tuple: (median values, MAD values)
+    """
+    median_vals = np.median(values, axis=1, keepdims=True)
+    abs_deviations = np.abs(values - median_vals)
+    mad_vals = np.median(abs_deviations, axis=1, keepdims=True) * 1.4826
+    return median_vals, mad_vals
+
+
 def calculate_pvalue(l,
-                     meta_data,
-                     upstearm = 500000,
-                     downstream = 500000,
-                     n_jobs = 1,
-                     method = 'pearson'):
-
+                      meta_data,
+                      upstream=500000,
+                      downstream=500000,
+                      method='pearson'):
+    """
+    Calculate p-values for gene-peak linkages.
+    
+    Args:
+        l (list): List of linkage matrices
+        meta_data (pd.DataFrame): Metadata containing gene and peak information
+        upstream (int, optional): Upstream distance for peak-gene pairs. Defaults to 500000.
+        downstream (int, optional): Downstream distance for peak-gene pairs. Defaults to 500000.
+        method (str, optional): Method to combine p-values. Defaults to 'pearson'.
+    
+    Returns:
+        pd.DataFrame: DataFrame containing gene-peak pairs with p-values
+    """
     melted_chrs = []
-
     for l_chr in tqdm(l):
-
-        df_reset = l_chr.reset_index()
-        melted_chr = pd.melt(df_reset, id_vars=['index'])
+        linkage_values = l_chr.values
+        n_genes, n_peaks = linkage_values.shape
+        gene_median, gene_mad = calculate_median_mad(linkage_values)
+        #gene_p_vals = norm.sf(linkage_values, loc=gene_median, scale=gene_mad)
+        abs_values = np.abs(linkage_values - gene_median)
+        gene_p_vals = 2 * norm.sf(abs_values, loc=0, scale=gene_mad)
+        gene_p_vals_adj = np.zeros_like(gene_p_vals)
+        for i in range(n_genes):
+            gene_p_vals_adj[i] = multipletests(gene_p_vals[i], method='bonferroni')[1]
+        linkage_values_T = linkage_values.T
+        peak_median, peak_mad = calculate_median_mad(linkage_values_T)
+        #peak_p_vals = norm.sf(linkage_values_T, loc=peak_median, scale=peak_mad)
+        abs_values = np.abs(linkage_values_T - peak_median)
+        peak_p_vals = norm.sf(abs_values, loc=peak_median, scale=peak_mad)
+        peak_p_vals_adj = np.zeros_like(peak_p_vals)
+        for i in range(n_peaks):
+            peak_p_vals_adj[i] = multipletests(peak_p_vals[i], method='bonferroni')[1]
+        peak_p_vals_adj = peak_p_vals_adj.T
+        gene_indices = np.arange(n_genes).repeat(n_peaks)
+        peak_indices = np.tile(np.arange(n_peaks), n_genes)
+        melted_chr = l_chr.stack().reset_index()
         melted_chr.columns = ['Gene', 'Peak', 'Value']
-
-        gene_p_values = []
-        gene_index = []
-
-        gene_to_indices = {}
-        for idx, gene in enumerate(melted_chr['Gene']):
-            if gene not in gene_to_indices:
-                gene_to_indices[gene] = []
-            gene_to_indices[gene].append(idx)
-
-        for index, row in l_chr.iterrows():
-            values = row.values
-            median_value = np.median(values)
-            mad_value = np.median(np.abs(values - median_value)) * 1.4826
-            p_values = norm.sf(values, loc=median_value, scale=mad_value)
-            adjusted_p_values = multipletests(p_values, method='bonferroni')[1]
-            ind = gene_to_indices.get(index, [])
-            gene_index.extend(ind)
-            gene_p_values.extend(adjusted_p_values)
-
-        peak_p_values = []
-        for index, col in l_chr.items():
-            values = col.values
-            median_value = np.median(values)
-            mad_value = np.median(np.abs(values - median_value)) * 1.4826
-            p_values = norm.sf(values, loc=median_value, scale=mad_value)
-            adjusted_p_values = multipletests(p_values, method='bonferroni')[1]
-            peak_p_values.extend(adjusted_p_values)
-
-        melted_chr.loc[gene_index, 'P.adj_Gene'] = gene_p_values
-        melted_chr['P.adj_Peak'] = peak_p_values
-
-        df_gene = meta_data.iloc[np.where(meta_data[1].isin(l_chr.index))[0], :]
-        df_gene.columns = ['Ensemble', 'Gene', 'Type', 'Chromosome', 'Start', 'End']
-        df_gene = df_gene.reset_index()
-
-        df_peak = pd.DataFrame(l_chr.columns, columns=['Peak'])
-        df_peak[['Chromosome', 'Start', 'End']] = df_peak['Peak'].str.split('-', n=2, expand=True)
-
-        index_distances = []
-        for index, row in df_gene.iterrows():
-            gene = row.Gene
-            range_gene = pr.PyRanges(df_gene.iloc[[index]])
-            range_gene.End = range_gene.End + upstearm
-            range_gene.Start = range_gene.Start - downstream
-            range_peak = pr.PyRanges(df_peak)
-            range_intersect_peak = range_peak.overlap(range_gene)
+        melted_chr['P.adj_Gene'] = gene_p_vals_adj[gene_indices, peak_indices]
+        melted_chr['P.adj_Peak'] = peak_p_vals_adj[gene_indices, peak_indices]
+        gene_meta = meta_data[meta_data[1].isin(l_chr.index)].copy()
+        gene_meta.columns = ['Ensemble', 'Gene', 'Type', 'Chromosome', 'Start', 'End']
+        peak_info = pd.DataFrame({
+            'Peak': l_chr.columns,
+            'Chr_Start_End': l_chr.columns
+        })
+        peak_split = peak_info['Chr_Start_End'].str.split('-', expand=True)
+        peak_info[['Chromosome', 'Start', 'End']] = peak_split
+        peak_info['Start'] = pd.to_numeric(peak_info['Start'], errors='coerce')
+        peak_info['End'] = pd.to_numeric(peak_info['End'], errors='coerce')
+        range_peak = pr.PyRanges(peak_info[['Chromosome', 'Start', 'End', 'Peak']])
+        valid_pairs = set()
+        for _, row in gene_meta.iterrows():
+            gene = row['Gene']
+            gene_range = pr.PyRanges(pd.DataFrame({
+                'Chromosome': [row['Chromosome']],
+                'Start': [row['Start'] - downstream],
+                'End': [row['End'] + upstream],
+                'Gene': [gene]
+            }))
+            range_intersect_peak = range_peak.overlap(gene_range)
             if len(range_intersect_peak) > 0:
-                intersect_peak = range_intersect_peak.Peak.tolist()
-                distance_df = pd.DataFrame(
-                    {"Gene": range_gene.Gene.tolist() * len(intersect_peak), "Peak": intersect_peak})
-                linkage_gene_df = melted_chr.iloc[gene_to_indices[gene], :]
-                index_distance = linkage_gene_df.index[np.where(linkage_gene_df['Peak'].isin(distance_df['Peak']))[0]]
-                index_distances.extend(index_distance)
-
-        melted_chr_distance = melted_chr.iloc[index_distances, :]
+                intersect_peak = range_intersect_peak.df['Peak'].tolist()
+                valid_pairs.update((gene, peak) for peak in intersect_peak)
+        gene_peak_pairs = pd.DataFrame(list(valid_pairs), columns=['Gene', 'Peak'])
+        melted_chr_distance = melted_chr.merge(gene_peak_pairs, on=['Gene', 'Peak'])
         melted_chr_distance = melted_chr_distance.drop_duplicates(subset=['Gene', 'Peak'])
-
-        if n_jobs == 1:
-            combine_p_values = []
-            for index, row in melted_chr_distance.iterrows():
-                new_value = combine_pvalues_row(row, method)
-                combine_p_values.append(new_value)
-            melted_chr_distance['Combine_p_value'] = combine_p_values
-
-        if n_jobs > 1:
-            melted_chr_distance['Combine_p_value'] = Parallel(n_jobs=n_jobs)(
-                delayed(combine_pvalues_row)(row, method) for index, row in melted_chr_distance.iterrows())
-
+        p_values = np.column_stack([melted_chr_distance['P.adj_Gene'], melted_chr_distance['P.adj_Peak']])
+        combine_p_vals = np.array([combine_pvalues(p, method).pvalue for p in p_values])
+        melted_chr_distance['Combine_p_value'] = combine_p_vals
         melted_chrs.append(melted_chr_distance)
-
     result = pd.concat(melted_chrs, ignore_index=True)
+    return (result)
 
-    return(result)
+
+
+
+
+
+
+
 
 
 
