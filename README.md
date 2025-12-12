@@ -31,11 +31,6 @@ After preparing the input data, you can run BioCRE using following code:
 ```
 result = linkage(rna_adata,
                  atac_adata,
-                 meta_data, ,
-                 min_cell=10,
-                 lr=0.5,
-                 max_iter=500,
-                 lambda_l2=0.1,
-                 downsample=None)
+                 meta_data)
 ```
 The returned list encompasses the linkage for each chromosome. Given that BioCRE can be resource-intensive, employing significant amounts of memory, you may opt to expedite processing and reduce memory consumption through cell downsampling. Setting the desired cell count via the `downsample` parameter facilitates this. Alternatively, utilizing the metacells derived from rna_adata and atac_adata can also speed computations, offering a strategy to manage large datasets more efficiently.
