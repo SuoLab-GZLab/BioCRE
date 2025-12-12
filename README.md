@@ -29,8 +29,11 @@ Pre-processing steps should be applied to the cells prior to inputting them into
 The input RNA and ATAC matrices should preferably be provided as raw count matrices, as these directly influence the statistical significance (p‑values) used to identify significant gene–regulatory element linkages. Users may adjust relevant parameters to modulate the stringency of linkage detection, thereby obtaining more or fewer significant associations as needed.
 After preparing the input data, you can run BioCRE using following code:
 ```
-result = linkage(rna_adata,
-                 atac_adata,
-                 meta_data)
+all_linkages = linkage(rna_adata, atac_adata, meta_data)
 ```
 The returned list encompasses the linkage for each chromosome. Given that BioCRE can be resource-intensive, employing significant amounts of memory, you may opt to expedite processing and reduce memory consumption through cell downsampling. Setting the desired cell count via the `downsample` parameter facilitates this. Alternatively, utilizing the metacells derived from rna_adata and atac_adata can also speed computations, offering a strategy to manage large datasets more efficiently.
+
+```
+sig_linkages = all_linkages[all_linkages['Combine_p_value'] < 1e-7].sort_values(by='Combine_p_value', ascending=True)
+```
+Significant linkages are identified by default using a combined p-value threshold of <1 × 10⁻⁷; users may adjust this threshold to obtain a more stringent or permissive set of results.
