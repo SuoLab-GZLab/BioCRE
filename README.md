@@ -22,8 +22,11 @@ Executing the BioCRE pipeline necessitates the provision of three primary inputs
 * `atac_adata` - This represents the snATAC-seq data encapsulated in an AnnData object.  
 * `meta_data` - This data serves as a genomic annotation of genes and peaks. Typically, the cellranger output file named 'features.tsv.gz' serves as the metadata.
 
-To ensure accurate integration and comparison across multi-omics data, it is imperative that the cells represented in both AnnData objects (rna_adata and atac_adata) are identical. This means that each cell in one dataset should correspond directly to a cell in the other dataset, maintaining consistency in cell identity and order.Pre-processing steps should be applied to the cells prior to inputting them into the analysis pipeline. These pre-processing measures typically include quality control checks, normalization, filtering out low-quality cells or features, and batch effect correction, if necessary. By performing these steps, you enhance the reliability and interpretability of downstream multi-omics analyses, ensuring that any observed correlations or differences are biologically meaningful rather than artifacts of technical variability.
+To ensure accurate integration and comparison across multi-omics data, it is imperative that the cells represented in both AnnData objects (rna_adata and atac_adata) are identical. This means that each cell in one dataset should correspond directly to a cell in the other dataset, maintaining consistency in cell identity and order. 
 
+Pre-processing steps should be applied to the cells prior to inputting them into the analysis pipeline. These pre-processing measures typically include quality control checks, normalization, filtering out low-quality cells or features, and batch effect correction, if necessary. By performing these steps, you enhance the reliability and interpretability of downstream multi-omics analyses, ensuring that any observed correlations or differences are biologically meaningful rather than artifacts of technical variability.
+
+The input RNA and ATAC matrices should preferably be provided as raw count matrices, as these directly influence the statistical significance (p‑values) used to identify significant gene–regulatory element linkages. Users may adjust relevant parameters to modulate the stringency of linkage detection, thereby obtaining more or fewer significant associations as needed.
 After preparing the input data, you can run BioCRE using following code:
 ```
 result = linkage(rna_adata,
